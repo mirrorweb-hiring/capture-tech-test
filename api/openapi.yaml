@@ -1,0 +1,551 @@
+openapi: 3.1.0
+info:
+  title: MirrorWeb Social API
+  version: "1.0.0"
+  license:
+    name: Internal — MirrorWeb hiring exercise
+  description: |
+    Read-only HTTP API for **MirrorWeb Social**, a fictional social platform. It is the data
+    source for the capture tech test: you fetch posts, replies, reactions, authors and
+    attachments from here and transform them into the archive envelope described in
+    `OUTPUT_FORMAT.md`.
+
+    ## What you need to know
+    - **GET only.** The API is read-only.
+    - **Bearer auth.** Every `/v1/*` endpoint requires `Authorization: Bearer <token>`. You will
+      be given a token out of band. `/health` is the only unauthenticated endpoint.
+    - **Resources reference each other by id.** Responses do **not** embed related objects. A post
+      carries an `author_id`, `thread_id`, `attachment_ids`, etc.
+    - **Pagination.** List endpoints take `offset` and `limit` and return a `pagination` block with
+      the `total`. The default `limit` is small on purpose — real collections span several pages,
+      so you must page through them.
+
+    ## Accessing a tunnelled instance
+    If the API is exposed to you over a localtunnel URL (`https://<name>.loca.lt`), send these
+    headers on every request so your client bypasses localtunnel's browser interstitial:
+    ```
+    Authorization: Bearer <token>
+    Bypass-Tunnel-Reminder: 1
+    User-Agent: capture-tech-test/1.0
+    ```
+
+servers:
+  - url: http://localhost:8080
+    description: Local instance
+  - url: https://{subdomain}.loca.lt
+    description: localtunnel-exposed instance
+    variables:
+      subdomain:
+        default: your-tunnel
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: system
+    description: Service metadata and health.
+  - name: threads
+    description: Threads (conversations) and the posts within them.
+  - name: posts
+    description: Posts and their replies.
+  - name: reactions
+    description: Reactions on posts.
+  - name: users
+    description: Accounts.
+  - name: media
+    description: Image attachments and their bytes.
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: Liveness probe (no auth)
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                example: { status: ok }
+
+  /v1/me:
+    get:
+      tags: [users]
+      operationId: getMe
+      summary: The account associated with the current access token
+      responses:
+        "200":
+          description: An account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/threads:
+    get:
+      tags: [threads]
+      operationId: listThreads
+      summary: List threads
+      parameters:
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of threads.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ThreadList" }
+              example:
+                data:
+                  - id: thr_0002
+                    subject: "@harley_rosenbaum: Mind the life, then celebrate!"
+                    opening_post_id: pst_000010
+                    member_ids: [usr_000037, usr_000007, usr_000018, usr_000010]
+                    started_at: "2026-07-05T13:31:00Z"
+                    last_activity_at: "2026-07-05T21:12:00Z"
+                pagination: { total: 8, offset: 0, limit: 1, count: 1 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/threads/{id}:
+    get:
+      tags: [threads]
+      operationId: getThread
+      summary: Get a thread
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: A thread.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Thread" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/threads/{id}/posts:
+    get:
+      tags: [threads]
+      operationId: listThreadPosts
+      summary: List all posts in a thread (opening post and replies), oldest first
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of posts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PostList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/posts:
+    get:
+      tags: [posts]
+      operationId: listPosts
+      summary: List posts (flat, newest first), optionally filtered
+      parameters:
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+        - name: author_id
+          in: query
+          schema: { type: string }
+          description: Only posts by this account.
+        - name: thread_id
+          in: query
+          schema: { type: string }
+          description: Only posts in this thread.
+        - name: top_level_only
+          in: query
+          schema: { type: boolean, default: false }
+          description: Only opening posts (exclude replies).
+      responses:
+        "200":
+          description: A page of posts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PostList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/posts/{id}:
+    get:
+      tags: [posts]
+      operationId: getPost
+      summary: Get a post
+      description: |
+        Removed posts are **not** deleted from the API — they are returned as tombstones with
+        `removed_at` set and `body` blanked.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: A post.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Post" }
+              examples:
+                reply:
+                  summary: A reply that mentions other accounts
+                  value:
+                    id: pst_000014
+                    thread_id: thr_0002
+                    author_id: usr_000037
+                    in_reply_to_post_id: pst_000010
+                    mentioned_account_ids: [usr_000007, usr_000018]
+                    body: "@garth_mclaughlin @arthur_cronin Durable woman were worth the calm."
+                    kind: reply
+                    posted_at: "2026-07-05T21:12:00Z"
+                    removed_at: null
+                    attachment_ids: []
+                    reaction_count: 4
+                original_with_attachments:
+                  summary: An opening post carrying three images
+                  value:
+                    id: pst_000027
+                    thread_id: thr_0005
+                    author_id: usr_000014
+                    in_reply_to_post_id: null
+                    mentioned_account_ids: []
+                    body: "Celebrate wins tied to the way."
+                    kind: original
+                    posted_at: "2026-06-29T14:12:00Z"
+                    removed_at: null
+                    attachment_ids: [med_0007, med_0008, med_0009]
+                    reaction_count: 9
+                removed_tombstone:
+                  summary: A removed post (body blanked, removal recorded)
+                  value:
+                    id: pst_000034
+                    thread_id: thr_0006
+                    author_id: usr_000037
+                    in_reply_to_post_id: null
+                    mentioned_account_ids: []
+                    body: ""
+                    kind: original
+                    posted_at: "2026-05-12T14:44:00Z"
+                    removed_at: "2026-05-15T14:44:00Z"
+                    attachment_ids: []
+                    reaction_count: 6
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/posts/{id}/replies:
+    get:
+      tags: [posts]
+      operationId: listReplies
+      summary: List direct replies to a post, oldest first
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of replies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PostList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/posts/{id}/reactions:
+    get:
+      tags: [reactions]
+      operationId: listReactions
+      summary: List reactions on a post, oldest first
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of reactions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReactionList" }
+              example:
+                data:
+                  - id: rxn_00074
+                    post_id: pst_000014
+                    account_id: usr_000002
+                    type: celebrate
+                    reacted_at: "2026-07-06T19:09:00Z"
+                  - id: rxn_00075
+                    post_id: pst_000014
+                    account_id: usr_000021
+                    type: like
+                    reacted_at: "2026-07-07T18:00:00Z"
+                pagination: { total: 4, offset: 0, limit: 2, count: 2 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/users/{id}:
+    get:
+      tags: [users]
+      operationId: getUser
+      summary: Get an account
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: An account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+              examples:
+                normal:
+                  value:
+                    id: usr_000001
+                    handle: jessica_hills
+                    full_name: Jessica Hills
+                    bio: Balance weather-resistant with man.
+                    verified: true
+                    joined_at: "2024-04-30T12:00:00Z"
+                no_display_name:
+                  summary: An account without a full name
+                  value:
+                    id: usr_000006
+                    handle: drstephens
+                    full_name: ""
+                    bio: That climb quickly purchase the point.
+                    verified: true
+                    joined_at: "2024-03-29T12:00:00Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/media/{id}:
+    get:
+      tags: [media]
+      operationId: getMedia
+      summary: Get attachment metadata
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Attachment metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Media" }
+              example:
+                id: med_0001
+                post_id: pst_000003
+                stored_filename: photo_med_0001.png
+                original_filename: why-group.png
+                content_type: image/png
+                embedded: true
+                width: 1024
+                height: 1024
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/media/{id}/content:
+    get:
+      tags: [media]
+      operationId: getMediaContent
+      summary: Download the attachment bytes
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: The image bytes.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A static bearer token, supplied to you out of band.
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: Number of items to skip.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+      description: Page size. Values above 100 are clamped, not rejected.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: unauthorized, message: "missing or malformed Authorization: Bearer header", status: 401 } }
+    NotFound:
+      description: No such resource.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: not_found, message: "no such post", status: 404 } }
+    BadRequest:
+      description: Invalid query parameter.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: invalid_parameter, message: "limit must be an integer", status: 400 } }
+
+  schemas:
+    User:
+      type: object
+      description: An account on MirrorWeb Social.
+      required: [id, handle, full_name, bio, verified, joined_at]
+      properties:
+        id: { type: string, description: Stable account id. }
+        handle: { type: string, description: Unique login handle. }
+        full_name: { type: string, description: Display name; may be an empty string. }
+        bio: { type: string }
+        verified: { type: boolean }
+        joined_at: { type: string, format: date-time, description: RFC 3339. }
+
+    Thread:
+      type: object
+      description: A thread groups an opening post and its replies.
+      required: [id, subject, opening_post_id, member_ids, started_at, last_activity_at]
+      properties:
+        id: { type: string }
+        subject: { type: string, description: Human-friendly thread label. }
+        opening_post_id: { type: string }
+        member_ids:
+          type: array
+          items: { type: string }
+          description: Distinct accounts that posted in the thread (mentioned-but-silent accounts are not members).
+        started_at: { type: string, format: date-time }
+        last_activity_at: { type: string, format: date-time }
+
+    Post:
+      type: object
+      description: A post. A post with `in_reply_to_post_id` set is a reply.
+      required: [id, thread_id, author_id, in_reply_to_post_id, mentioned_account_ids, body, kind, posted_at, removed_at, attachment_ids, reaction_count]
+      properties:
+        id: { type: string }
+        thread_id: { type: string }
+        author_id: { type: string }
+        in_reply_to_post_id:
+          type: [string, "null"]
+          description: Parent post id, or null for an opening post.
+        mentioned_account_ids:
+          type: array
+          items: { type: string }
+          description: Accounts @-mentioned in the body.
+        body: { type: string, description: Text content; empty string if the post was removed. }
+        kind: { type: string, enum: [original, reply] }
+        posted_at: { type: string, format: date-time }
+        removed_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the post was removed, or null if live.
+        attachment_ids:
+          type: array
+          items: { type: string }
+        reaction_count:
+          type: integer
+          description: Total reactions on the post (equal to the total from the reactions endpoint).
+
+    Media:
+      type: object
+      description: An image attachment. Fetch the bytes from `/v1/media/{id}/content`.
+      required: [id, post_id, stored_filename, original_filename, content_type, embedded, width, height]
+      properties:
+        id: { type: string }
+        post_id: { type: string }
+        stored_filename: { type: string, description: Canonical stored filename. }
+        original_filename: { type: string, description: Filename the uploader used. }
+        content_type: { type: string }
+        embedded: { type: boolean, description: Shown inline in the post vs. attached separately. }
+        width: { type: integer }
+        height: { type: integer }
+
+    Reaction:
+      type: object
+      description: |
+        A lightweight response to a post. Note: `id` and `reacted_at` are provided by MirrorWeb
+        Social for archival completeness; many real platforms do not expose a per-reaction id or
+        timestamp.
+      required: [id, post_id, account_id, type, reacted_at]
+      properties:
+        id:
+          type: string
+          x-simulated: true
+        post_id: { type: string }
+        account_id: { type: string }
+        type: { type: string, enum: [like, love, insightful, celebrate] }
+        reacted_at:
+          type: string
+          format: date-time
+          x-simulated: true
+
+    Pagination:
+      type: object
+      required: [total, offset, limit, count]
+      properties:
+        total:
+          type: integer
+          description: Total items matching the query (ignoring paging).
+        offset: { type: integer }
+        limit: { type: integer }
+        count:
+          type: integer
+          description: Items returned in this page.
+
+    ThreadList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Thread" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    PostList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Post" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    ReactionList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Reaction" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, status]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            status: { type: integer }
